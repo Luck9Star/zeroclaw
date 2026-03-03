@@ -1,0 +1,156 @@
+name: Build Binary
+
+on:
+    push:
+        branches: [main]
+        paths-ignore:
+            - "**.md"
+            - "docs/**"
+            - ".github/workflows/**"
+            - "!.github/workflows/build-binary.yml"
+    pull_request:
+        branches: [main]
+    workflow_dispatch:
+        inputs:
+            build_windows:
+                description: "Build Windows x64"
+                required: false
+                default: true
+                type: boolean
+            build_linux_x64:
+                description: "Build Linux x64"
+                required: false
+                default: true
+                type: boolean
+            build_linux_arm64:
+                description: "Build Linux ARM64 (RPi 3B+ 64-bit OS)"
+                required: false
+                default: true
+                type: boolean
+            build_linux_armv7:
+                description: "Build Linux ARMv7 (RPi 3B+ 32-bit OS)"
+                required: false
+                default: false
+                type: boolean
+
+concurrency:
+    group: build-binary-${{ github.ref }}
+    cancel-in-progress: true
+
+env:
+    CARGO_TERM_COLOR: always
+    RUST_BACKTRACE: "1"
+
+jobs:
+    build:
+        name: Build ${{ matrix.target }}
+        runs-on: ${{ matrix.os }}
+        timeout-minutes: 30
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    # Windows x64
+                    - os: windows-latest
+                      target: x86_64-pc-windows-msvc
+                      artifact: zeroclaw.exe
+                      archive_ext: zip
+                      enabled: ${{ github.event_name != 'workflow_dispatch' || inputs.build_windows }}
+
+                    # Linux x64
+                    - os: ubuntu-latest
+                      target: x86_64-unknown-linux-gnu
+                      artifact: zeroclaw
+                      archive_ext: tar.gz
+                      enabled: ${{ github.event_name != 'workflow_dispatch' || inputs.build_linux_x64 }}
+
+                    # Linux ARM64 (Raspberry Pi 3B+ with 64-bit OS)
+                    - os: ubuntu-latest
+                      target: aarch64-unknown-linux-gnu
+                      artifact: zeroclaw
+                      archive_ext: tar.gz
+                      cross_compiler: gcc-aarch64-linux-gnu
+                      linker_env: CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER
+                      linker: aarch64-linux-gnu-gcc
+                      enabled: ${{ github.event_name != 'workflow_dispatch' || inputs.build_linux_arm64 }}
+
+                    # Linux ARMv7 (Raspberry Pi 3B+ with 32-bit OS)
+                    - os: ubuntu-latest
+                      target: armv7-unknown-linux-gnueabihf
+                      artifact: zeroclaw
+                      archive_ext: tar.gz
+                      cross_compiler: gcc-arm-linux-gnueabihf
+                      linker_env: CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER
+                      linker: arm-linux-gnueabihf-gcc
+                      enabled: ${{ github.event_name == 'workflow_dispatch' && inputs.build_linux_armv7 }}
+
+        steps:
+            - name: Skip disabled target
+              if: matrix.enabled == false
+              shell: bash
+              run: echo "Target disabled, skipping"
+
+            - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+              if: matrix.enabled
+
+            - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
+              if: matrix.enabled
+              with:
+                  toolchain: stable
+                  targets: ${{ matrix.target }}
+
+            - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v3
+              if: matrix.enabled && runner.os != 'Windows'
+
+            - name: Install cross-compilation toolchain (Linux)
+              if: matrix.enabled && runner.os == 'Linux' && matrix.cross_compiler != ''
+              run: |
+                  sudo apt-get update -qq
+                  sudo apt-get install -y ${{ matrix.cross_compiler }}
+
+            - name: Build release
+              if: matrix.enabled
+              shell: bash
+              env:
+                  LINKER_ENV: ${{ matrix.linker_env }}
+                  LINKER: ${{ matrix.linker }}
+              run: |
+                  if [ -n "$LINKER_ENV" ] && [ -n "$LINKER" ]; then
+                    echo "Using linker: $LINKER_ENV=$LINKER"
+                    export "$LINKER_ENV=$LINKER"
+                  fi
+                  cargo build --release --locked --target ${{ matrix.target }}
+
+            - name: Check binary size
+              if: matrix.enabled
+              shell: bash
+              run: |
+                  binary="target/${{ matrix.target }}/release/${{ matrix.artifact }}"
+                  if [ -f "$binary" ]; then
+                    size=$(stat -c%s "$binary" 2>/dev/null || stat -f%z "$binary" 2>/dev/null)
+                    size_mb=$((size / 1024 / 1024))
+                    echo "Binary size: ${size_mb}MB (${size} bytes)"
+                    if [ "$size_mb" -gt 28 ]; then
+                      echo "::warning::Binary exceeds 28MB target (${size_mb}MB)"
+                    fi
+                  fi
+
+            - name: Package (Unix)
+              if: matrix.enabled && runner.os != 'Windows'
+              run: |
+                  cd target/${{ matrix.target }}/release
+                  tar czf ../../../zeroclaw-${{ matrix.target }}.${{ matrix.archive_ext }} ${{ matrix.artifact }}
+
+            - name: Package (Windows)
+              if: matrix.enabled && runner.os == 'Windows'
+              run: |
+                  cd target/${{ matrix.target }}/release
+                  7z a ../../../zeroclaw-${{ matrix.target }}.${{ matrix.archive_ext }} ${{ matrix.artifact }}
+
+            - name: Upload artifact
+              if: matrix.enabled
+              uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+              with:
+                  name: zeroclaw-${{ matrix.target }}
+                  path: zeroclaw-${{ matrix.target }}.${{ matrix.archive_ext }}
+                  retention-days: 30
