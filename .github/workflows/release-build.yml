@@ -18,11 +18,12 @@ env:
     GIT_CONFIG_KEY_0: core.hooksPath
     GIT_CONFIG_VALUE_0: /dev/null
     CARGO_TERM_COLOR: always
+    ENSURE_RUST_COMPONENTS: "rustfmt clippy"
 
 jobs:
     build-and-test:
         name: Build and Test (Linux x86_64)
-        runs-on: [self-hosted, Linux, X64, aws-india, blacksmith-2vcpu-ubuntu-2404, hetzner]
+        runs-on: [self-hosted, Linux, X64, blacksmith-2vcpu-ubuntu-2404]
         timeout-minutes: 120
 
         steps:
@@ -47,6 +48,17 @@ jobs:
               shell: bash
               run: ./scripts/ci/ensure_cc.sh
 
+            - name: Ensure rustfmt and clippy components
+              shell: bash
+              run: rustup component add rustfmt clippy --toolchain 1.92.0
+
+            - name: Activate toolchain binaries on PATH
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  toolchain_bin="$(dirname "$(rustup which --toolchain 1.92.0 cargo)")"
+                  echo "$toolchain_bin" >> "$GITHUB_PATH"
+
             - name: Ensure cargo component
               shell: bash
               env:
@@ -65,9 +77,8 @@ jobs:
               shell: bash
               run: |
                   set -euo pipefail
-                  cargo fmt --all -- --check
-                  cargo clippy --locked --all-targets -- -D warnings
-                  cargo test --locked --verbose
+                  ./scripts/ci/rust_quality_gate.sh
+                  cargo test --locked --lib --bins --verbose
 
             - name: Build production binary (canonical)
               shell: bash
